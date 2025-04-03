@@ -1,0 +1,121 @@
+name: Flutter Web Build
+description: Flutter Web Build
+inputs:
+  repo_owner:
+    required: false
+    default: ${{ github.repository_owner}}
+    description: Repository owner
+  repo_name:
+    required: false
+    default: ${{ github.event.repository.name}}
+    description: Repository name
+  release_version:
+    required: true
+    description: Release version
+  release_tag:
+    required: false
+    description: Release tag
+  base_href:
+    required: false
+    description: Base URL for the application ( /app , https://example.com/app , app )
+    default: ""
+  project:
+    required: false
+    description: Project sub folder
+  token:
+    required: false
+    description: Git token if needed
+    default: ${{ github.token}}
+  token64:
+    required: false
+    description: Base64 Access token
+  env_vars:
+    description: "JSON string of environment variables in dart"
+    required: false
+    default: "{}"
+runs:
+  using: "composite"
+  steps:
+  - name: Install deps
+    shell: bash
+    run: apt update && apt install zip
+  - name: Clean Workspace
+    shell: bash
+    run: |
+        rm -Rf ${{ inputs.repo_name }} packaging
+  - name: Checkout Code
+    uses: actions/checkout@v3
+    with:
+      repository: ${{ inputs.repo_owner }}/${{ inputs.repo_name }}
+      token: ${{ inputs.token }}
+      ref: ${{ github.ref }}
+      path: ${{ inputs.repo_name }}
+      submodules: recursive
+  - name: Build Code
+    env:
+      CI: "" 
+    shell: bash
+    run: |
+      cd ${{ inputs.repo_name }}
+      flutter doctor --verbose
+      flutter pub get
+      if [[ -n '${{ inputs.env_vars }}' && '${{ inputs.env_vars }}' != '{}' ]]; then
+        echo "Generating dart json file"
+        echo '${{ inputs.env_vars }}' | jq '.' > dart_defines.json
+        cat dart_defines.json
+      fi
+      flutter build web $( [[ -f dart_defines.json ]] && echo "--dart-define-from-file=dart_defines.json" ) $([ ! -z ${{ inputs.base_href }} ] && echo --base=/${{ inputs.base_href }}/)
+      mkdir -p dist
+      mv build/web/* dist/
+
+
+  - name: Package Release
+    shell: bash
+    run: |
+        mkdir -p packaging/dist
+        mv ${{ inputs.repo_name }}/${{ inputs.project }}/dist/* packaging/dist/
+        cd packaging
+        zip -r ${{ inputs.repo_name }}-${{ inputs.release_version }}.zip dist
+
+  - name: Delete Previous Remote Release If Found
+    uses: dev-drprasad/delete-tag-and-release@v0.2.1
+    with:
+      delete_release: true
+      tag_name: ${{ inputs.repo_name }}-${{ inputs.release_tag }}
+      repo: ${{ inputs.repo_owner }}/${{ inputs.repo_name }}
+    env:
+      GITHUB_TOKEN: ${{ inputs.token }}
+
+  - name: Create New Remote Release
+    id: create_release
+    uses: ncipollo/release-action@v1.12.0
+    with:
+      token: ${{ inputs.token }}
+      owner: ${{ inputs.repo_owner }}
+      repo: ${{ inputs.repo_name }}
+      tag: ${{ inputs.repo_name }}-${{ inputs.release_tag }}
+      draft: true
+      prerelease: false
+
+  - name: Upload Release Assets
+    uses: dream-encode/upload-release-asset-node16@v2.0.3
+    env:
+      GITHUB_TOKEN: ${{ inputs.token }}
+    with:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      asset_path: packaging/${{ inputs.repo_name }}-${{ inputs.release_version }}.zip
+      asset_name: ${{ inputs.repo_name }}-${{ inputs.release_version }}.zip
+      asset_content_type: application/zip
+  
+  - name: Publish Release
+    uses: StuYarrow/publish-release@v1.1.2
+    env:
+      GITHUB_TOKEN: ${{ inputs.token }}
+    with:
+      id: ${{ steps.create_release.outputs.id }}
+      owner: ${{ inputs.repo_owner }}
+      repo: ${{ inputs.repo_name }}
+  - name: Post Cleanup
+    shell: bash
+    if: ${{ always() }}
+    run: rm -Rf ${{ inputs.repo_name }} packaging
